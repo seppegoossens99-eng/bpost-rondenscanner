@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1830"><title>Bpost RondenScanner</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#eaf1ff;background:#091326}*{box-sizing:border-box}body{margin:0}main{max-width:720px;margin:auto;padding:18px 16px 40px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}h1{font-size:1.55rem;margin:0}p{line-height:1.5;color:#afbdd6}h2{font-size:1.1rem;margin:0 0 12px}.panel{background:#14233d;border:1px solid #2a3c5c;border-radius:18px;padding:18px;margin:14px 0}.drop{display:block;text-align:center;border:2px dashed #5c80bb;padding:25px 10px;border-radius:14px;cursor:pointer;background:#10213c}.drop.drag{border-color:#66e3bd;background:#193f47}input[type=file]{display:none}button,.button{appearance:none;border:0;border-radius:12px;padding:13px 16px;background:#65e0b5;color:#07231d;font-weight:750;font-size:1rem;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#2d4364;color:#fff}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.small{font-size:.86rem;color:#afbdd6}.status{margin-top:10px;white-space:pre-wrap;color:#b8d2ff}.error{color:#ffb5b5}.ok{color:#80ebbf}video{width:100%;aspect-ratio:4/3;object-fit:cover;background:#02050c;border-radius:15px;display:block}.camera{position:relative}.target{position:absolute;inset:22% 8%;border:3px solid #6fe8b8;border-radius:16px;box-shadow:0 0 0 999px #0005;pointer-events:none}.target:before{content:"Richt het adres binnen dit kader";position:absolute;top:-32px;left:0;font-size:.8rem;color:#fff;text-shadow:0 1px 4px #000}.result{text-align:center;padding:24px 10px;background:#0e2b30;border-radius:16px;margin-top:14px}.round{font-size:clamp(4rem,20vw,7rem);font-weight:900;line-height:1.1;color:#72f0bd}.address{font-size:1.15rem;font-weight:700;margin-top:8px}.warn{background:#3a2c20}.warn .round{color:#ffce88;font-size:2rem}.pill{font-size:.8rem;padding:5px 9px;background:#263c5d;border-radius:100px}.hidden{display:none!important}input[type=text]{padding:13px;border-radius:12px;background:#0a1930;border:1px solid #5b7191;color:white;font-size:1rem;width:100%}details{margin-top:15px}summary{cursor:pointer}#log{font-size:.83rem;color:#a6bad7;max-height:140px;overflow:auto}footer{color:#879ab6;font-size:.8rem;margin-top:25px}
+</style></head><body><main>
+<header><div><h1>📬 Bpost RondenScanner</h1><div class="small">Live adres → rondenummer</div></div><span class="pill" id="fileCount">0 bestanden</span></header>
+<section class="panel"><h2>1. Excelbestand laden</h2><label class="drop" id="drop" for="files">📄<br><strong>Tik om Excel te kiezen</strong><br><span class="small">Of sleep één of meerdere .xlsx-bestanden hierheen</span></label><input id="files" type="file" accept=".xlsx,.xls" multiple>
+<div id="fileStatus" class="status">Nog geen bestand geladen.</div><div class="actions"><button class="secondary" id="clear">Bestanden wissen</button></div>
+<p class="small">Bestanden worden alleen op dit toestel verwerkt en lokaal onthouden. Importeer bij een wijziging opnieuw.</p></section>
+<section class="panel"><h2>2. Scan een brief</h2><div class="camera"><video id="video" autoplay muted playsinline></video><div class="target hidden" id="target"></div></div>
+<div class="actions"><button id="start" disabled>📷 Start scanner</button><button id="stop" class="secondary" disabled>Stop</button><button id="switch" class="secondary" disabled>Camera wisselen</button></div>
+<div id="scanStatus" class="status">Laad eerst een Excelbestand.</div>
+<div id="result" class="result hidden" aria-live="polite"><div class="small" id="resultLabel">RONDE</div><div class="round" id="round">—</div><div class="address" id="address"></div><div class="small" id="details"></div></div>
+<details><summary>Handmatig adres controleren</summary><p class="small">Handig om eerst de Excel-koppeling te testen.</p><input id="manual" type="text" placeholder="Acacialaan 3, Achel"><div class="actions"><button id="lookup">Zoek ronde</button></div></details>
+<details><summary>Diagnose en herkenningsdetails</summary><div id="log">Nog geen scan.</div></details>
+</section><footer>Prototype • Live OCR gebeurt op je toestel. Er worden geen camerafoto's opgeslagen of verstuurd. Voor cameratoegang moet deze pagina via HTTPS of localhost worden geopend. De OCR- en Excelbibliotheken worden bij gebruik via internet geladen.</footer>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const state={files:[],rules:[],stream:null,running:false,busy:false,worker:null,side:'environment',timer:null,seen:new Map(),lastKey:'',lastAt:0};
+const DB='bpost-rondenscanner', STORE='excel';
+function log(msg){$('log').textContent=(new Date().toLocaleTimeString()+' '+msg+'\n'+$('log').textContent).slice(0,3200)}
+function status(msg,error=false){$('scanStatus').textContent=msg;$('scanStatus').className='status'+(error?' error':'')}
+function norm(s){return String(s??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[’‘`]/g,"'").replace(/[^A-Z0-9']/g,' ').replace(/\s+/g,' ').trim()}
+function streetNorm(s){return norm(s).replace(/\bSTRAAT\b/g,'STRAAT')}
+function postcode(v){let m=String(v??'').match(/\b[1-9]\d{3}\b/);return m?m[0]:''}
+function placeFor(sub,filename){const s=norm(sub),f=norm(filename);
+ if(s.startsWith('ACHEL'))return 'ACHEL';if(s.startsWith('HAMON'))return 'HAMONT';if(s.startsWith('NEERP'))return 'NEERPELT';if(s.startsWith('OVERP'))return 'OVERPELT';
+ if(s.startsWith('HECHT'))return 'HECHTEL';if(s.startsWith('EKSEL'))return 'EKSEL';if(s.startsWith('LEOPO'))return 'LEOPOLDSBURG';
+ if(f.includes('HAMONT'))return 'HAMONT-ACHEL';if(f.includes('OVERPELT'))return 'OVERPELT';if(f.includes('NEERPELT'))return 'NEERPELT';if(f.includes('LEOPOLDSBURG'))return 'LEOPOLDSBURG';return s}
+function parseRanges(s){s=String(s??'').trim();if(!s)return {whole:true,ranges:[],valid:true};
+ const pieces=s.split(/\s*\/\s*/);let ranges=[];
+ for(const p of pieces){const m=p.trim().match(/^(\d+)\s*[-–]\s*(\d+)$/);if(!m)return {whole:false,ranges:[],valid:false};
+ const a=+m[1],b=+m[2];if(a>b)return {whole:false,ranges:[],valid:false};
+ ranges.push({a,b,parity:a%2===b%2?a%2:null});}
+ return {whole:false,ranges,valid:true}
+}
+function parseSheet(buffer,name){const wb=XLSX.read(buffer,{type:'array'}),out=[];
+ for(const sheet of wb.SheetNames){for(const row of XLSX.utils.sheet_to_json(wb.Sheets[sheet],{header:1,defval:''})){
+ let raw=String(row[0]??'').trim(),m=raw.match(/(?:RES[\s-]*)?(\d{1,4})$/i),street=streetNorm(row[2]);if(!m||!street||street==='STREET')continue;
+ let r=parseRanges(row[3]);if(!r.valid){log('Overgeslagen: '+street+' — bijzondere huisnummernotatie: '+row[3]);continue}
+ out.push({round:String(+m[1]),street,place:placeFor(row[1],name),zip:postcode(row[6]),whole:r.whole,ranges:r.ranges,filename:name});
+ }}return out}
+function matchesHouse(rule,n){return rule.whole||rule.ranges.some(r=>n>=r.a&&n<=r.b&&(r.parity===null||n%2===r.parity))}
+function matchPlace(rule,text){const p=norm(text);if(!p)return true;
+ if(p.includes(rule.place))return true;
+ if(rule.place==='OVERPELT'||rule.place==='NEERPELT')return p.includes('PELT');
+ if(rule.place==='ACHEL'||rule.place==='HAMONT')return p.includes('HAMONT ACHEL');
+ if(rule.place==='HECHTEL'||rule.place==='EKSEL')return p.includes('HECHTEL EKSEL');
+ return false}
+function findMatches(street,number,place,zip){let n=parseInt(String(number),10),st=streetNorm(street);if(!st||!Number.isFinite(n))return [];
+ let candidates=state.rules.filter(r=>r.street===st&&matchesHouse(r,n));
+ if(zip)candidates=candidates.filter(r=>!r.zip||r.zip===zip);
+ if(place){let byPlace=candidates.filter(r=>matchPlace(r,place));if(byPlace.length)candidates=byPlace;}
+ // An unbounded street rule is only usable when no competing bounded rule matches.
+ if(candidates.some(r=>!r.whole))candidates=candidates.filter(r=>!r.whole);
+ const distinct=[...new Set(candidates.map(r=>r.round))];return distinct.length===1?candidates:[]}
+function setResult(round,address,detail='',warning=false){$('result').className='result'+(warning?' warn':'');$('round').textContent=round;$('address').textContent=address;$('details').textContent=detail;$('resultLabel').textContent=warning?'CONTROLEER ADRES':'RONDE'}
+function resolveAddress(street,num,place='',zip='',source=''){let matches=findMatches(street,num,place,zip);if(!matches.length)return null;
+ let r=matches[0],label=`${street} ${num}${place?', '+place:''}${zip?' ('+zip+')':''}`;return {round:r.round,label,detail:r.filename+' · '+r.place,source}}
+function candidatesFromText(text){const lines=text.split(/\n/).map(x=>x.trim()).filter(Boolean);let result=[];
+ // Typical Belgian address: "STREET 12 bus 3" and next line "3900 PELT"
+ for(let i=0;i<lines.length;i++){const line=lines[i].replace(/[,:;]/g,' ').replace(/\s+/g,' ').trim();
+ const m=line.match(/^(.{3,65}?)\s+(\d{1,4}[A-Za-z]?)(?:\s*(?:BUS|BTE|B|BOX)\s*[\w-]+)?(?:\s+([1-9]\d{3})\s+(.+))?$/i);
+ if(!m)continue;
+ const st=streetNorm(m[1]),num=m[2],near=lines.slice(i,i+3).join(' '),z=postcode(m[3]||near),p=m[4]||near;
+ if(st.length<4)continue;result.push({st,num,zip:z,place:p});}
+ return result}
+function processText(text){log('OCR: '+text.replace(/\n/g,' | ').slice(0,260));let found=[];
+ for(const c of candidatesFromText(text)){let r=resolveAddress(c.st,c.num,c.place,c.zip,'ocr');if(r)found.push(r)}
+ // Fallback for OCR lines containing unrelated text before the address: match known street name, followed by a number.
+ if(!found.length){let flat=norm(text);for(const st of [...new Set(state.rules.map(r=>r.street))]){if(st.length<5)continue;let idx=flat.indexOf(st);if(idx<0)continue;let rest=flat.slice(idx+st.length),m=rest.match(/^\s+(\d{1,4}[A-Z]?)/);if(!m)continue;let z=postcode(flat),r=resolveAddress(st,m[1],'',z,'ocr');if(r)found.push(r)}}
+ const uniq=[...new Map(found.map(x=>[x.round+'|'+x.label,x])).values()];
+ if(uniq.length!==1){if(uniq.length>1)status('Meerdere mogelijke adressen in beeld. Richt op één adres.');return}
+ const r=uniq[0],key=r.round+'|'+r.label,now=Date.now();
+ state.seen.set(key,{count:(state.seen.get(key)?.count||0)+1,at:now});
+ for(const [k,v] of state.seen)if(now-v.at>12000)state.seen.delete(k);
+ if(state.seen.get(key).count>=2){if(state.lastKey!==key||now-state.lastAt>15000){setResult(r.round,r.label,r.detail);state.lastKey=key;state.lastAt=now;}status('Adres herkend. Richt op de volgende brief.');}
+ else status('Adres gevonden; nogmaals controleren…');
+}
+function manualLookup(){let t=$('manual').value.trim();if(!t)return;let c=candidatesFromText(t.replace(/,\s*/g,'\n'));let found=c.map(x=>resolveAddress(x.st,x.num,x.place,x.zip,'manual')).filter(Boolean);
+ if(!found.length){let flat=norm(t);for(const st of [...new Set(state.rules.map(r=>r.street))]){let idx=flat.indexOf(st);if(idx<0)continue;let m=flat.slice(idx+st.length).match(/^\s+(\d{1,4}[A-Z]?)/);if(m){let r=resolveAddress(st,m[1],'',postcode(flat));if(r)found.push(r)}}}
+ if(found.length===1){setResult(found[0].round,found[0].label,found[0].detail);status('Handmatige controle geslaagd.')}else{setResult('?',t,'Geen unieke match gevonden. Controleer straat, nummer en bestand.',true);status('Geen eenduidige ronde gevonden.');}}
+async function openDb(){return new Promise((res,rej)=>{let q=indexedDB.open(DB,1);q.onupgradeneeded=()=>q.result.createObjectStore(STORE,{keyPath:'name'});q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})}
+async function dbPut(name,buffer){let db=await openDb();return new Promise((res,rej)=>{let tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put({name,buffer});tx.oncomplete=res;tx.onerror=()=>rej(tx.error)})}
+async function dbAll(){let db=await openDb();return new Promise((res,rej)=>{let q=db.transaction(STORE).objectStore(STORE).getAll();q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})}
+async function dbClear(){let db=await openDb();return new Promise((res,rej)=>{let tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).clear();tx.oncomplete=res;tx.onerror=()=>rej(tx.error)})}
+function updateFiles(){state.rules=state.files.flatMap(f=>f.rules);$('fileCount').textContent=state.files.length+' bestand(en)';$('fileStatus').textContent=state.files.length?state.files.map(f=>`${f.name}: ${f.rules.length} geldige regels`).join('\n')+`\nTotaal: ${state.rules.length} regels.`:'Nog geen bestand geladen.';$('start').disabled=!state.rules.length||state.running;if(!state.running)status(state.rules.length?'Klaar om te scannen.':'Laad eerst een Excelbestand.')}
+async function importFiles(files){if(!window.XLSX){$('fileStatus').textContent='Excelbibliotheek niet geladen. Controleer je internetverbinding.';return}
+ for(const file of files){if(!/\.xlsx?$/i.test(file.name))continue;try{let buffer=await file.arrayBuffer(),rules=parseSheet(buffer,file.name);if(!rules.length)throw Error('Geen geldige ronde-regels');state.files=state.files.filter(f=>f.name!==file.name);state.files.push({name:file.name,rules});await dbPut(file.name,buffer)}catch(e){log('Import mislukt: '+file.name+' '+e.message);$('fileStatus').textContent='Fout bij '+file.name+': '+e.message}}updateFiles()}
+async function initWorker(){if(state.worker)return;status('OCR-model laden (eerste keer kan even duren)…');if(!window.Tesseract){await new Promise((resolve,reject)=>{let s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';s.onload=resolve;s.onerror=()=>reject(Error('OCR-bibliotheek kon niet worden geladen'));document.head.appendChild(s)})}state.worker=await Tesseract.createWorker('nld+eng',1,{logger:m=>{if(m.status==='loading language traineddata')status('OCR-taalmodel downloaden: '+Math.round((m.progress||0)*100)+'%')}});await state.worker.setParameters({preserve_interword_spaces:'1'});}
+async function start(){if(state.running)return;if(!navigator.mediaDevices?.getUserMedia){status('Camera vereist HTTPS of localhost. Publiceer de website via HTTPS.',true);return}
+ try{state.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:state.side},width:{ideal:1280},height:{ideal:720}}});$('video').srcObject=state.stream;await $('video').play();state.running=true;$('target').classList.remove('hidden');$('stop').disabled=false;$('switch').disabled=false;$('start').disabled=true;await initWorker();status('Scanner actief. Houd het adres stil binnen het kader.');scheduleScan()}catch(e){status('Camera/OCR kon niet starten: '+e.message,true);log(e.stack||e.message);await stop()}}
+function scheduleScan(){if(!state.running)return;state.timer=setTimeout(async()=>{if(!state.running||state.busy)return scheduleScan();state.busy=true;try{let v=$('video');if(v.videoWidth){let c=document.createElement('canvas');const w=Math.min(1280,v.videoWidth);c.width=w;c.height=Math.round(w*v.videoWidth**-1*v.videoHeight);c.getContext('2d').drawImage(v,0,0,c.width,c.height);let result=await state.worker.recognize(c);processText(result.data.text)}}catch(e){log('OCR-fout: '+e.message)}finally{state.busy=false;scheduleScan()}},700)}
+async function stop(){state.running=false;clearTimeout(state.timer);state.stream?.getTracks().forEach(t=>t.stop());state.stream=null;$('video').srcObject=null;$('target').classList.add('hidden');$('stop').disabled=true;$('switch').disabled=true;$('start').disabled=!state.rules.length;if(state.rules.length)status('Scanner gestopt.')}
+$('files').addEventListener('change',e=>importFiles([...e.target.files]));$('drop').addEventListener('dragover',e=>{e.preventDefault();$('drop').classList.add('drag')});$('drop').addEventListener('dragleave',()=>$('drop').classList.remove('drag'));$('drop').addEventListener('drop',e=>{e.preventDefault();$('drop').classList.remove('drag');importFiles([...e.dataTransfer.files])});
+$('clear').onclick=async()=>{await stop();await dbClear();state.files=[];updateFiles();$('result').classList.add('hidden')};$('start').onclick=start;$('stop').onclick=stop;$('switch').onclick=async()=>{await stop();state.side=state.side==='environment'?'user':'environment';await start()};$('lookup').onclick=manualLookup;$('manual').addEventListener('keydown',e=>{if(e.key==='Enter')manualLookup()});
+(async()=>{try{if(!window.XLSX)throw Error('Excelbibliotheek niet beschikbaar. Internet nodig.');for(const item of await dbAll()){try{state.files.push({name:item.name,rules:parseSheet(item.buffer,item.name)})}catch(e){log('Opgeslagen bestand mislukt: '+item.name)}}updateFiles()}catch(e){status(e.message,true)}})();
+</script></body></html>
